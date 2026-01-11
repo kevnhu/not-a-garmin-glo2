@@ -32,11 +32,27 @@
 #include "esp_spp_api.h"
 #include "nvs_flash.h"
 
-// Configuration
-#define GPS_UART_NUM        UART_NUM_2
-#define GPS_RX_PIN          16
-#define GPS_TX_PIN          17
-#define GPS_BAUD_RATE       9600
+// Configuration - use Kconfig values where available
+#ifndef CONFIG_GPS_UART_NUM
+#define CONFIG_GPS_UART_NUM 2
+#endif
+#ifndef CONFIG_GPS_RX_PIN
+#define CONFIG_GPS_RX_PIN 16
+#endif
+#ifndef CONFIG_GPS_TX_PIN
+#define CONFIG_GPS_TX_PIN 17
+#endif
+#ifndef CONFIG_GPS_BAUD_RATE
+#define CONFIG_GPS_BAUD_RATE 9600
+#endif
+#ifndef CONFIG_BT_DEVICE_NAME
+#define CONFIG_BT_DEVICE_NAME "ForeFlight GPS"
+#endif
+
+#define GPS_UART_NUM        (UART_NUM_0 + CONFIG_GPS_UART_NUM)
+#define GPS_RX_PIN          CONFIG_GPS_RX_PIN
+#define GPS_TX_PIN          CONFIG_GPS_TX_PIN
+#define GPS_BAUD_RATE       CONFIG_GPS_BAUD_RATE
 #define GPS_BUF_SIZE        1024
 
 #define I2C_MASTER_SCL_IO   22
@@ -45,7 +61,7 @@
 #define I2C_MASTER_FREQ_HZ  100000
 #define OLED_ADDRESS        0x3C
 
-#define BT_DEVICE_NAME      "ForeFlight GPS"
+#define BT_DEVICE_NAME      CONFIG_BT_DEVICE_NAME
 #define SPP_SERVER_NAME     "SPP_SERVER"
 
 // OLED Commands
@@ -227,18 +243,24 @@ static void parse_nmea(const char *sentence)
         char *token;
         char *buf = strdup(sentence);
         int field = 0;
-        
+
         token = strtok(buf, ",");
         while (token != NULL) {
             field++;
             if (field == 4) { // Latitude
-                strncpy(gps_data.latitude, token, sizeof(gps_data.latitude) - 1);
-            } else if (field == 5) { // N/S
-                strncat(gps_data.latitude, token, 1);
+                strncpy(gps_data.latitude, token, sizeof(gps_data.latitude) - 2);
+                gps_data.latitude[sizeof(gps_data.latitude) - 2] = '\0';
+            } else if (field == 5 && strlen(gps_data.latitude) < sizeof(gps_data.latitude) - 1) { // N/S
+                size_t len = strlen(gps_data.latitude);
+                gps_data.latitude[len] = token[0];
+                gps_data.latitude[len + 1] = '\0';
             } else if (field == 6) { // Longitude
-                strncpy(gps_data.longitude, token, sizeof(gps_data.longitude) - 1);
-            } else if (field == 7) { // E/W
-                strncat(gps_data.longitude, token, 1);
+                strncpy(gps_data.longitude, token, sizeof(gps_data.longitude) - 2);
+                gps_data.longitude[sizeof(gps_data.longitude) - 2] = '\0';
+            } else if (field == 7 && strlen(gps_data.longitude) < sizeof(gps_data.longitude) - 1) { // E/W
+                size_t len = strlen(gps_data.longitude);
+                gps_data.longitude[len] = token[0];
+                gps_data.longitude[len + 1] = '\0';
             }
             token = strtok(NULL, ",");
         }
