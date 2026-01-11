@@ -1,0 +1,33 @@
+menu "ForeFlight GPS Configuration"
+
+    config GPS_UART_NUM
+        int "GPS UART port number"
+        default 2
+        help
+            UART port number for GPS module (UART2 recommended)
+
+    config GPS_RX_PIN
+        int "GPS RX GPIO"
+        default 16
+        help
+            GPIO pin connected to GPS TX
+
+    config GPS_TX_PIN
+        int "GPS TX GPIO"
+        default 17
+        help
+            GPIO pin connected to GPS RX
+
+    config GPS_BAUD_RATE
+        int "GPS baud rate"
+        default 9600
+        help
+            Baud rate for GPS communication
+
+    config BT_DEVICE_NAME
+        string "Bluetooth device name"
+        default "ForeFlight GPS"
+        help
+            Name visible to ForeFlight
+
+endmenu

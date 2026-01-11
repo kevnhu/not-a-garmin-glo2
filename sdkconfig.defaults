@@ -1,0 +1,21 @@
+# Bluetooth - Enable Classic Bluetooth
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_SPP_ENABLED=y
+CONFIG_BT_BLE_ENABLED=n
+
+# Bluetooth controller settings
+CONFIG_BTDM_CTRL_MODE_BTDM=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y
+
+# Serial flasher config
+CONFIG_ESPTOOLPY_BAUD_921600B=y
+
+# Compiler options for performance
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+
+# Main task stack size
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
