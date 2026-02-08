@@ -20,14 +20,14 @@ menu "ForeFlight GPS Configuration"
 
     config GPS_BAUD_RATE
         int "GPS baud rate"
-        default 9600
+        default 115200
         help
             Baud rate for GPS communication
 
-    config BT_DEVICE_NAME
-        string "Bluetooth device name"
+    config WIFI_SSID
+        string "WiFi AP SSID"
         default "ForeFlight GPS"
         help
-            Name visible to ForeFlight
+            WiFi access point name visible to devices
 
 endmenu
