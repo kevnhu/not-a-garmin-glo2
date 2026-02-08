@@ -1,6 +1,6 @@
-# ForeFlight WiFi GPS (ESP-IDF)
+# ForeFlight WiFi GPS
 
-> This project was entirely vibe coded with [Claude](https://claude.ai) by Anthropic.
+> This project was entirely vibe coded with [Claude](https://claude.ai) by Anthropic. It's meant to replicate a Garmin GLO 2, but I was too cheap to buy one.
 
 A WiFi GPS receiver for ForeFlight using ESP32, M8N GPS module, and OLED display. Built with ESP-IDF framework in pure C with FreeRTOS.
 
