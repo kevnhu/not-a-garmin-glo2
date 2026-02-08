@@ -1,8 +1,10 @@
 /*
- * ForeFlight Bluetooth GPS - ESP-IDF Version (BLE)
+ * ForeFlight WiFi GPS - ESP-IDF Version
  * ESP32 + M8N GPS + OLED Display
  *
- * Uses BLE Nordic UART Service (NUS) for iOS/ForeFlight compatibility
+ * Sends GPS data to ForeFlight via WiFi using GDL90 protocol.
+ * ESP32 creates a WiFi access point, iPad connects to it,
+ * and ForeFlight automatically receives GPS data via UDP broadcast.
  *
  * Connections:
  * M8N GPS:
@@ -23,17 +25,15 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gatts_api.h"
-#include "esp_bt_defs.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
+#include "lwip/sockets.h"
 
 // Configuration
 #define GPS_UART_NUM        UART_NUM_2
@@ -48,29 +48,13 @@
 #define I2C_MASTER_FREQ_HZ  100000
 #define OLED_ADDRESS        0x3C
 
-#define BLE_DEVICE_NAME     "ForeFlight GPS"
-#define GATTS_APP_ID        0
-#define BLE_MTU_SIZE        247
+#define WIFI_SSID           "ForeFlight GPS"
+#define WIFI_CHANNEL        6
+#define WIFI_MAX_CONN       4
 
-// Nordic UART Service UUIDs
-// NUS Service: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-// NUS TX Char: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E (Notify - ESP32 sends to phone)
-// NUS RX Char: 6E400002-B5A3-F393-E0A9-E50E24DCCA9E (Write - phone sends to ESP32)
-
-static const uint8_t nus_service_uuid[16] = {
-    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-    0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E
-};
-
-static const uint8_t nus_tx_char_uuid[16] = {
-    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-    0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E
-};
-
-static const uint8_t nus_rx_char_uuid[16] = {
-    0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-    0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40, 0x6E
-};
+#define GDL90_PORT          4000
+#define GDL90_FLAG          0x7E
+#define GDL90_ESCAPE        0x7D
 
 // OLED Commands
 #define OLED_CMD_DISPLAY_OFF    0xAE
@@ -94,92 +78,19 @@ static const char *TAG = "GPS";
 typedef struct {
     int satellites;
     bool gps_fixed;
-    char latitude[16];
-    char longitude[16];
-    char altitude[16];
+    char latitude_str[20];
+    char longitude_str[20];
+    char altitude_str[16];
+    double latitude;      // decimal degrees (+N, -S)
+    double longitude;     // decimal degrees (+E, -W)
+    double altitude_m;    // meters
+    double speed_kt;      // ground speed in knots
+    double track_deg;     // true track in degrees
 } gps_data_t;
 
 static gps_data_t gps_data = {0};
-static bool bt_connected = false;
-
-// BLE state
-static uint16_t ble_gatts_if = ESP_GATT_IF_NONE;
-static uint16_t ble_conn_id = 0;
-static uint16_t ble_tx_handle = 0;
-static bool ble_notifications_enabled = false;
-
-// GATT database handles
-enum {
-    IDX_SVC,
-    IDX_TX_CHAR,
-    IDX_TX_VAL,
-    IDX_TX_CCC,
-    IDX_RX_CHAR,
-    IDX_RX_VAL,
-    IDX_NB,
-};
-
-static uint16_t ble_handle_table[IDX_NB];
-
-// BLE advertising data
-static esp_ble_adv_data_t adv_data = {
-    .set_scan_rsp = false,
-    .include_name = true,
-    .include_txpower = false,
-    .min_interval = 0x20,
-    .max_interval = 0x40,
-    .appearance = 0x00,
-    .manufacturer_len = 0,
-    .p_manufacturer_data = NULL,
-    .service_data_len = 0,
-    .p_service_data = NULL,
-    .service_uuid_len = 16,
-    .p_service_uuid = (uint8_t *)nus_service_uuid,
-    .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
-};
-
-static esp_ble_adv_params_t adv_params = {
-    .adv_int_min = 0x20,
-    .adv_int_max = 0x40,
-    .adv_type = ADV_TYPE_IND,
-    .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-    .channel_map = ADV_CHNL_ALL,
-    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-};
-
-// GATT service database
-static const uint16_t primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
-static const uint16_t char_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
-static const uint16_t ccc_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
-static const uint8_t char_prop_notify = ESP_GATT_CHAR_PROP_BIT_NOTIFY;
-static const uint8_t char_prop_write = ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
-static uint8_t ccc_val[2] = {0x00, 0x00};
-
-static const esp_gatts_attr_db_t gatt_db[IDX_NB] = {
-    // Service Declaration
-    [IDX_SVC] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid,
-        ESP_GATT_PERM_READ, 16, sizeof(nus_service_uuid), (uint8_t *)nus_service_uuid}},
-
-    // TX Characteristic Declaration (ESP32 -> Phone, Notify)
-    [IDX_TX_CHAR] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&char_declaration_uuid,
-        ESP_GATT_PERM_READ, 1, 1, (uint8_t *)&char_prop_notify}},
-
-    // TX Characteristic Value
-    [IDX_TX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_128, (uint8_t *)nus_tx_char_uuid,
-        0, BLE_MTU_SIZE, 0, NULL}},
-
-    // TX Client Characteristic Configuration (for notifications)
-    [IDX_TX_CCC] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&ccc_uuid,
-        ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, 2, sizeof(ccc_val), (uint8_t *)ccc_val}},
-
-    // RX Characteristic Declaration (Phone -> ESP32, Write)
-    [IDX_RX_CHAR] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&char_declaration_uuid,
-        ESP_GATT_PERM_READ, 1, 1, (uint8_t *)&char_prop_write}},
-
-    // RX Characteristic Value
-    [IDX_RX_VAL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_128, (uint8_t *)nus_rx_char_uuid,
-        ESP_GATT_PERM_WRITE, BLE_MTU_SIZE, 0, NULL}},
-};
+static int wifi_clients = 0;
+static int udp_sock = -1;
 
 // ==================== I2C / OLED Functions ====================
 
@@ -387,11 +298,11 @@ static void oled_update_display(void)
         oled_write_data(zeros, 128);
     }
 
-    char line[22];
+    char line[32];
 
     oled_draw_text(0, 0, "ForeFlight GPS");
 
-    snprintf(line, sizeof(line), "BT: %s", bt_connected ? "Connected" : "Waiting...");
+    snprintf(line, sizeof(line), "WiFi: %s", wifi_clients > 0 ? "Connected" : "Waiting...");
     oled_draw_text(1, 0, line);
 
     snprintf(line, sizeof(line), "GPS: %s", gps_data.gps_fixed ? "FIX" : "Searching");
@@ -400,65 +311,86 @@ static void oled_update_display(void)
     snprintf(line, sizeof(line), "Sats: %d", gps_data.satellites);
     oled_draw_text(3, 0, line);
 
-    if (gps_data.altitude[0]) {
-        snprintf(line, sizeof(line), "Alt: %sm", gps_data.altitude);
+    if (gps_data.altitude_str[0]) {
+        snprintf(line, sizeof(line), "Alt: %sm", gps_data.altitude_str);
         oled_draw_text(4, 0, line);
     }
 
-    if (gps_data.latitude[0]) {
-        snprintf(line, sizeof(line), "Lat: %s", gps_data.latitude);
+    if (gps_data.latitude_str[0]) {
+        snprintf(line, sizeof(line), "Lat: %s", gps_data.latitude_str);
         oled_draw_text(5, 0, line);
     }
 
-    if (gps_data.longitude[0]) {
-        snprintf(line, sizeof(line), "Lon: %s", gps_data.longitude);
+    if (gps_data.longitude_str[0]) {
+        snprintf(line, sizeof(line), "Lon: %s", gps_data.longitude_str);
         oled_draw_text(6, 0, line);
     }
 }
 
 // ==================== NMEA Parser ====================
 
+static double nmea_to_dd(const char *coord, char dir)
+{
+    if (!coord || !coord[0]) return 0.0;
+    double raw = atof(coord);
+    int deg = (int)(raw / 100);
+    double min = raw - deg * 100;
+    double dd = deg + min / 60.0;
+    if (dir == 'S' || dir == 'W') dd = -dd;
+    return dd;
+}
+
 static void parse_nmea(const char *sentence)
 {
     if (strncmp(sentence, "$GPGGA", 6) == 0 || strncmp(sentence, "$GNGGA", 6) == 0) {
-        char *token;
         char *buf = strdup(sentence);
+        char *token = strtok(buf, ",");
         int field = 0;
+        char lat[16] = "", lon[16] = "";
+        char lat_d = 'N', lon_d = 'E';
 
-        token = strtok(buf, ",");
         while (token != NULL) {
             field++;
-            if (field == 7) {
-                int quality = atoi(token);
-                gps_data.gps_fixed = (quality > 0);
-            } else if (field == 8) {
-                gps_data.satellites = atoi(token);
-            } else if (field == 10) {
-                strncpy(gps_data.altitude, token, sizeof(gps_data.altitude) - 1);
+            switch (field) {
+                case 3: strncpy(lat, token, sizeof(lat) - 1); break;
+                case 4: if (token[0]) lat_d = token[0]; break;
+                case 5: strncpy(lon, token, sizeof(lon) - 1); break;
+                case 6: if (token[0]) lon_d = token[0]; break;
+                case 7: gps_data.gps_fixed = (atoi(token) > 0); break;
+                case 8: gps_data.satellites = atoi(token); break;
+                case 10:
+                    strncpy(gps_data.altitude_str, token, sizeof(gps_data.altitude_str) - 1);
+                    gps_data.altitude_m = atof(token);
+                    break;
             }
             token = strtok(NULL, ",");
         }
+
+        if (lat[0]) {
+            gps_data.latitude = nmea_to_dd(lat, lat_d);
+            snprintf(gps_data.latitude_str, sizeof(gps_data.latitude_str), "%s%c", lat, lat_d);
+        }
+        if (lon[0]) {
+            gps_data.longitude = nmea_to_dd(lon, lon_d);
+            snprintf(gps_data.longitude_str, sizeof(gps_data.longitude_str), "%s%c", lon, lon_d);
+        }
+
         free(buf);
     }
     else if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0) {
-        char *token;
         char *buf = strdup(sentence);
+        char *token = strtok(buf, ",");
         int field = 0;
 
-        token = strtok(buf, ",");
         while (token != NULL) {
             field++;
-            if (field == 4) {
-                strncpy(gps_data.latitude, token, sizeof(gps_data.latitude) - 1);
-            } else if (field == 5) {
-                strncat(gps_data.latitude, token, 1);
-            } else if (field == 6) {
-                strncpy(gps_data.longitude, token, sizeof(gps_data.longitude) - 1);
-            } else if (field == 7) {
-                strncat(gps_data.longitude, token, 1);
+            switch (field) {
+                case 8: gps_data.speed_kt = atof(token); break;
+                case 9: gps_data.track_deg = atof(token); break;
             }
             token = strtok(NULL, ",");
         }
+
         free(buf);
     }
 }
@@ -498,94 +430,268 @@ static void gps_configure(void)
     ESP_LOGI(TAG, "GPS configured for NMEA output");
 }
 
-// ==================== BLE Send ====================
+// ==================== GDL90 Protocol ====================
 
-static void ble_send_data(const uint8_t *data, size_t len)
+static uint16_t gdl90_crc_table[256];
+
+static void gdl90_crc_init(void)
 {
-    if (!bt_connected || !ble_notifications_enabled || ble_gatts_if == ESP_GATT_IF_NONE) {
+    for (int i = 0; i < 256; i++) {
+        uint16_t crc = (uint16_t)(i << 8);
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+        }
+        gdl90_crc_table[i] = crc;
+    }
+}
+
+static uint16_t gdl90_crc(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0;
+    for (size_t i = 0; i < len; i++) {
+        crc = gdl90_crc_table[crc >> 8] ^ (crc << 8) ^ data[i];
+    }
+    return crc;
+}
+
+static size_t gdl90_frame(const uint8_t *msg, size_t msg_len, uint8_t *out)
+{
+    uint16_t crc = gdl90_crc(msg, msg_len);
+    size_t idx = 0;
+
+    out[idx++] = GDL90_FLAG;
+
+    // Byte-stuff message data
+    for (size_t i = 0; i < msg_len; i++) {
+        if (msg[i] == GDL90_FLAG || msg[i] == GDL90_ESCAPE) {
+            out[idx++] = GDL90_ESCAPE;
+            out[idx++] = msg[i] ^ 0x20;
+        } else {
+            out[idx++] = msg[i];
+        }
+    }
+
+    // CRC low byte (byte-stuffed)
+    uint8_t crc_lo = crc & 0xFF;
+    if (crc_lo == GDL90_FLAG || crc_lo == GDL90_ESCAPE) {
+        out[idx++] = GDL90_ESCAPE;
+        out[idx++] = crc_lo ^ 0x20;
+    } else {
+        out[idx++] = crc_lo;
+    }
+
+    // CRC high byte (byte-stuffed)
+    uint8_t crc_hi = (crc >> 8) & 0xFF;
+    if (crc_hi == GDL90_FLAG || crc_hi == GDL90_ESCAPE) {
+        out[idx++] = GDL90_ESCAPE;
+        out[idx++] = crc_hi ^ 0x20;
+    } else {
+        out[idx++] = crc_hi;
+    }
+
+    out[idx++] = GDL90_FLAG;
+    return idx;
+}
+
+static void gdl90_send(const uint8_t *data, size_t len)
+{
+    if (udp_sock < 0) return;
+
+    struct sockaddr_in dest = {
+        .sin_family = AF_INET,
+        .sin_port = htons(GDL90_PORT),
+    };
+    inet_aton("192.168.4.255", &dest.sin_addr);
+
+    sendto(udp_sock, data, len, 0, (struct sockaddr *)&dest, sizeof(dest));
+}
+
+// GDL90 Heartbeat (Message ID 0) - sent every second
+static void gdl90_send_heartbeat(void)
+{
+    uint8_t msg[7] = {
+        0x00,  // Message ID
+        (uint8_t)(gps_data.gps_fixed ? 0x81 : 0x01),  // Status 1: GPS valid + UAT init
+        0x00,  // Status 2
+        0x00, 0x00,  // Timestamp
+        0x00, 0x00,  // Message counts
+    };
+    uint8_t frame[32];
+    size_t len = gdl90_frame(msg, 7, frame);
+    gdl90_send(frame, len);
+}
+
+// GDL90 Ownship Report (Message ID 10) - GPS position
+static void gdl90_send_ownship(void)
+{
+    uint8_t msg[28];
+    memset(msg, 0, sizeof(msg));
+
+    msg[0] = 0x0A;  // Message ID: Ownship Report
+    msg[1] = 0x01;  // Address type: self-assigned
+
+    // Participant address
+    msg[2] = 0x00;
+    msg[3] = 0x00;
+    msg[4] = 0x01;
+
+    // Latitude (24-bit signed, semicircles)
+    int32_t lat_enc = (int32_t)(gps_data.latitude / 180.0 * (1 << 23));
+    msg[5] = (lat_enc >> 16) & 0xFF;
+    msg[6] = (lat_enc >> 8) & 0xFF;
+    msg[7] = lat_enc & 0xFF;
+
+    // Longitude (24-bit signed, semicircles)
+    int32_t lon_enc = (int32_t)(gps_data.longitude / 180.0 * (1 << 23));
+    msg[8] = (lon_enc >> 16) & 0xFF;
+    msg[9] = (lon_enc >> 8) & 0xFF;
+    msg[10] = lon_enc & 0xFF;
+
+    // Altitude (12-bit, 25ft increments from -1000ft)
+    double alt_ft = gps_data.altitude_m * 3.28084;
+    int alt_enc = (int)((alt_ft + 1000.0) / 25.0);
+    if (alt_enc < 0) alt_enc = 0;
+    if (alt_enc > 0xFFE) alt_enc = 0xFFE;
+
+    // Misc: airborne + true track + updated
+    uint8_t misc = 0x0B;
+    msg[11] = (alt_enc >> 4) & 0xFF;
+    msg[12] = ((alt_enc & 0x0F) << 4) | misc;
+
+    // NIC=8, NACp=8
+    msg[13] = 0x88;
+
+    // Horizontal velocity (12-bit, knots)
+    int hvel = (int)gps_data.speed_kt;
+    if (hvel > 0xFFE) hvel = 0xFFE;
+
+    // Vertical velocity (12-bit signed, 64fpm increments) - unknown
+    int vvel = 0x800;
+
+    msg[14] = (hvel >> 4) & 0xFF;
+    msg[15] = ((hvel & 0x0F) << 4) | ((vvel >> 8) & 0x0F);
+    msg[16] = vvel & 0xFF;
+
+    // Track/Heading
+    msg[17] = (uint8_t)(gps_data.track_deg / 360.0 * 256.0);
+
+    // Emitter category: light aircraft
+    msg[18] = 0x01;
+
+    // Callsign (8 bytes, space-padded)
+    memcpy(msg + 19, "FFGPS   ", 8);
+
+    // Emergency/Priority + spare
+    msg[27] = 0x00;
+
+    uint8_t frame[96];
+    size_t len = gdl90_frame(msg, 28, frame);
+    gdl90_send(frame, len);
+}
+
+// GDL90 Ownship Geometric Altitude (Message ID 11)
+static void gdl90_send_geo_alt(void)
+{
+    uint8_t msg[5];
+    msg[0] = 0x0B;  // Message ID
+
+    // Geometric altitude in 5-foot increments
+    double alt_ft = gps_data.altitude_m * 3.28084;
+    int16_t geo_alt = (int16_t)(alt_ft / 5.0);
+    msg[1] = (geo_alt >> 8) & 0xFF;
+    msg[2] = geo_alt & 0xFF;
+
+    // Vertical figure of merit (meters)
+    msg[3] = 0x00;
+    msg[4] = 0x0A;  // 10 meters
+
+    uint8_t frame[32];
+    size_t len = gdl90_frame(msg, 5, frame);
+    gdl90_send(frame, len);
+}
+
+// ForeFlight extended ID message (Message ID 0x65)
+static void gdl90_send_ff_id(void)
+{
+    uint8_t msg[31];
+    memset(msg, 0, sizeof(msg));
+
+    msg[0] = 0x65;  // ForeFlight message ID
+    msg[1] = 0x00;  // Sub-type: device ID
+    msg[2] = 0x01;  // Version
+
+    // Device serial (8 bytes, space-padded)
+    memcpy(msg + 3, "ESPGPS01", 8);
+
+    // Device long name (16 bytes, space-padded)
+    memcpy(msg + 11, "ForeFlight GPS  ", 16);
+
+    // Capabilities (4 bytes, big-endian)
+    msg[27] = 0x00;
+    msg[28] = 0x00;
+    msg[29] = 0x00;
+    msg[30] = 0x01;  // Bit 0: WAAS GPS
+
+    uint8_t frame[96];
+    size_t len = gdl90_frame(msg, 31, frame);
+    gdl90_send(frame, len);
+}
+
+// ==================== WiFi ====================
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                                int32_t event_id, void *event_data)
+{
+    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_clients++;
+        ESP_LOGI(TAG, "WiFi client connected (total: %d)", wifi_clients);
+    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (wifi_clients > 0) wifi_clients--;
+        ESP_LOGI(TAG, "WiFi client disconnected (total: %d)", wifi_clients);
+    }
+}
+
+static void wifi_init_ap(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_ap();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+
+    wifi_config_t wifi_config = {
+        .ap = {
+            .ssid = WIFI_SSID,
+            .ssid_len = sizeof(WIFI_SSID) - 1,
+            .channel = WIFI_CHANNEL,
+            .max_connection = WIFI_MAX_CONN,
+            .authmode = WIFI_AUTH_OPEN,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "WiFi AP started - SSID: %s", WIFI_SSID);
+}
+
+static void udp_init(void)
+{
+    udp_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_sock < 0) {
+        ESP_LOGE(TAG, "Failed to create UDP socket");
         return;
     }
 
-    // BLE can send max ~20 bytes per notification (or MTU-3)
-    // Send in chunks
-    size_t offset = 0;
-    while (offset < len) {
-        size_t chunk = len - offset;
-        if (chunk > 20) chunk = 20;
-        esp_ble_gatts_send_indicate(ble_gatts_if, ble_conn_id,
-            ble_handle_table[IDX_TX_VAL], chunk, (uint8_t *)data + offset, false);
-        offset += chunk;
-        if (offset < len) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
-}
+    int broadcast = 1;
+    setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
 
-// ==================== BLE Callbacks ====================
-
-static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
-{
-    switch (event) {
-    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
-        esp_ble_gap_start_advertising(&adv_params);
-        break;
-    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-        if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "BLE advertising started");
-        }
-        break;
-    default:
-        break;
-    }
-}
-
-static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
-                                esp_ble_gatts_cb_param_t *param)
-{
-    switch (event) {
-    case ESP_GATTS_REG_EVT:
-        ESP_LOGI(TAG, "BLE GATT registered");
-        ble_gatts_if = gatts_if;
-        esp_ble_gap_set_device_name(BLE_DEVICE_NAME);
-        esp_ble_gap_config_adv_data(&adv_data);
-        esp_ble_gatts_create_attr_tab(gatt_db, gatts_if, IDX_NB, 0);
-        break;
-
-    case ESP_GATTS_CREAT_ATTR_TAB_EVT:
-        if (param->add_attr_tab.status == ESP_GATT_OK && param->add_attr_tab.num_handle == IDX_NB) {
-            memcpy(ble_handle_table, param->add_attr_tab.handles, sizeof(ble_handle_table));
-            ble_tx_handle = ble_handle_table[IDX_TX_VAL];
-            esp_ble_gatts_start_service(ble_handle_table[IDX_SVC]);
-            ESP_LOGI(TAG, "BLE NUS service started");
-        }
-        break;
-
-    case ESP_GATTS_CONNECT_EVT:
-        ESP_LOGI(TAG, "BLE client connected");
-        ble_conn_id = param->connect.conn_id;
-        bt_connected = true;
-        break;
-
-    case ESP_GATTS_DISCONNECT_EVT:
-        ESP_LOGI(TAG, "BLE client disconnected");
-        bt_connected = false;
-        ble_notifications_enabled = false;
-        esp_ble_gap_start_advertising(&adv_params);
-        break;
-
-    case ESP_GATTS_WRITE_EVT:
-        if (param->write.handle == ble_handle_table[IDX_TX_CCC]) {
-            if (param->write.len == 2) {
-                uint16_t descr_value = (param->write.value[1] << 8) | param->write.value[0];
-                ble_notifications_enabled = (descr_value == 0x0001);
-                ESP_LOGI(TAG, "BLE notifications %s", ble_notifications_enabled ? "enabled" : "disabled");
-            }
-        }
-        break;
-
-    default:
-        break;
-    }
+    ESP_LOGI(TAG, "UDP socket ready (port %d)", GDL90_PORT);
 }
 
 // ==================== Tasks ====================
@@ -598,11 +704,6 @@ static void gps_task(void *arg)
 
     while (1) {
         int len = uart_read_bytes(GPS_UART_NUM, data, sizeof(data), pdMS_TO_TICKS(100));
-
-        // Forward raw GPS data to BLE
-        if (len > 0 && bt_connected && ble_notifications_enabled) {
-            ble_send_data(data, len);
-        }
 
         for (int i = 0; i < len; i++) {
             if (data[i] == '$') {
@@ -619,6 +720,27 @@ static void gps_task(void *arg)
     }
 }
 
+static void gdl90_task(void *arg)
+{
+    gdl90_crc_init();
+
+    while (1) {
+        // Always send heartbeat
+        gdl90_send_heartbeat();
+
+        // Send position if we have a fix
+        if (gps_data.gps_fixed) {
+            gdl90_send_ownship();
+            gdl90_send_geo_alt();
+        }
+
+        // Send ForeFlight device ID
+        gdl90_send_ff_id();
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 static void display_task(void *arg)
 {
     while (1) {
@@ -631,7 +753,7 @@ static void display_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "ForeFlight Bluetooth GPS Starting (BLE)...");
+    ESP_LOGI(TAG, "ForeFlight WiFi GPS Starting...");
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -645,17 +767,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing I2C...");
     ESP_ERROR_CHECK(i2c_master_init());
 
-    // Scan I2C bus to find OLED address
     ESP_LOGI(TAG, "Scanning I2C bus...");
     for (uint8_t addr = 1; addr < 127; addr++) {
         i2c_cmd_handle_t cmd = i2c_cmd_link_create();
         i2c_master_start(cmd);
         i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
         i2c_master_stop(cmd);
-        esp_err_t ret = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(50));
+        esp_err_t err = i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, pdMS_TO_TICKS(50));
         i2c_cmd_link_delete(cmd);
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, ">>> I2C device found at address 0x%02X", addr);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "I2C device found at 0x%02X", addr);
         }
     }
 
@@ -680,23 +801,17 @@ void app_main(void)
     // Configure GPS module to output NMEA
     gps_configure();
 
-    // Initialize BLE
-    ESP_LOGI(TAG, "Initializing BLE...");
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+    // Initialize WiFi AP
+    ESP_LOGI(TAG, "Starting WiFi AP...");
+    wifi_init_ap();
 
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
-    ESP_ERROR_CHECK(esp_bluedroid_init());
-    ESP_ERROR_CHECK(esp_bluedroid_enable());
-
-    ESP_ERROR_CHECK(esp_ble_gap_register_callback(gap_event_handler));
-    ESP_ERROR_CHECK(esp_ble_gatts_register_callback(gatts_event_handler));
-    ESP_ERROR_CHECK(esp_ble_gatts_app_register(GATTS_APP_ID));
+    // Initialize UDP socket
+    udp_init();
 
     // Create tasks
     xTaskCreate(gps_task, "gps_task", 4096, NULL, 5, NULL);
-    xTaskCreate(display_task, "display_task", 4096, NULL, 4, NULL);
+    xTaskCreate(gdl90_task, "gdl90_task", 4096, NULL, 4, NULL);
+    xTaskCreate(display_task, "display_task", 4096, NULL, 3, NULL);
 
-    ESP_LOGI(TAG, "System ready!");
+    ESP_LOGI(TAG, "System ready! Connect iPad to WiFi: %s", WIFI_SSID);
 }
