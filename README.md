@@ -1,8 +1,10 @@
-# ForeFlight Bluetooth GPS (ESP-IDF)
+# ForeFlight WiFi GPS (ESP-IDF)
 
-A Bluetooth GPS receiver for ForeFlight using ESP32, M8N GPS module, and OLED display. Built with ESP-IDF framework in pure C with FreeRTOS.
+> This project was entirely vibe coded with [Claude](https://claude.ai) by Anthropic.
 
-Uses BLE (Bluetooth Low Energy) with the Nordic UART Service (NUS) for iOS compatibility. Classic Bluetooth SPP is not supported on iOS without MFi certification, so BLE is required.
+A WiFi GPS receiver for ForeFlight using ESP32, M8N GPS module, and OLED display. Built with ESP-IDF framework in pure C with FreeRTOS.
+
+The ESP32 creates a WiFi access point and sends GPS data to ForeFlight using the GDL90 protocol over UDP. Just connect your iPad to the "ForeFlight GPS" WiFi network and ForeFlight automatically picks up the GPS data - no pairing or certification needed.
 
 ## Hardware Requirements
 
