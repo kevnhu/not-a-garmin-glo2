@@ -92,9 +92,9 @@ idf.py -p /dev/cu.usbserial-* flash monitor
 
 ## OLED Display
 
-The OLED display shows real-time GPS and Bluetooth status using a built-in 5x7 pixel font:
+The OLED display shows real-time GPS and WiFi status using a built-in 5x7 pixel font:
 - **Line 1**: "ForeFlight GPS" title
-- **Line 2**: Bluetooth connection status (Connected / Waiting...)
+- **Line 2**: WiFi connection status (Connected / Waiting...)
 - **Line 3**: GPS fix status (FIX / Searching)
 - **Line 4**: Number of satellites
 - **Line 5**: Altitude (meters)
@@ -103,9 +103,10 @@ The OLED display shows real-time GPS and Bluetooth status using a built-in 5x7 p
 
 ## How It Works
 
-1. **GPS**: The M8N module communicates at 115200 baud using UBX protocol natively. At startup, the firmware sends a UBX CFG-PRT command to switch the module's output to NMEA 0183 format, which ForeFlight understands.
-2. **BLE**: The ESP32 advertises as "ForeFlight GPS" using the Nordic UART Service (NUS). When ForeFlight connects, it subscribes to notifications on the TX characteristic. The firmware forwards raw NMEA sentences from the GPS to the BLE TX characteristic in 20-byte chunks.
-3. **Display**: A separate FreeRTOS task updates the OLED every 2 seconds with parsed GPS data.
+1. **GPS**: The M8N module communicates at 115200 baud using UBX protocol natively. At startup, the firmware sends a UBX CFG-PRT command to switch the module's output to NMEA 0183 format, then parses NMEA sentences to extract position data.
+2. **WiFi**: The ESP32 creates a WiFi access point ("ForeFlight GPS"). When an iPad connects, the firmware broadcasts GDL90 protocol messages over UDP port 4000. ForeFlight automatically detects the GPS data - no pairing or certification needed.
+3. **GDL90**: The firmware encodes GPS position into GDL90 messages (Heartbeat, Ownship Report, Geometric Altitude, ForeFlight ID) with proper CRC-16 and byte stuffing, sent once per second.
+4. **Display**: A separate FreeRTOS task updates the OLED every 2 seconds with parsed GPS data.
 
 ## Troubleshooting
 
@@ -124,20 +125,19 @@ The OLED display shows real-time GPS and Bluetooth status using a built-in 5x7 p
 - Verify GPS module has power (LED should blink)
 - Monitor serial output: `idf.py monitor` to see NMEA sentences
 
-### Bluetooth Won't Connect
+### WiFi Won't Connect
 - Make sure ESP32 is powered on
-- Check serial monitor for "BLE advertising started" message
-- The device advertises as "ForeFlight GPS" via BLE
-- iOS requires BLE (not Classic Bluetooth) - this project uses BLE NUS
-- Try forgetting device in Bluetooth settings and re-pairing
+- Check serial monitor for "WiFi AP started" message
+- Look for "ForeFlight GPS" network in iPad WiFi settings
+- Try toggling WiFi off/on on your iPad
 - Restart ESP32
 
 ### No Data in ForeFlight
 - Check OLED display shows satellites and fix
-- Verify Bluetooth is connected (serial log: "BLE client connected")
-- Verify notifications are enabled (serial log: "BLE notifications enabled")
-- In ForeFlight Devices, check if GPS is receiving data
-- Try disconnecting and reconnecting Bluetooth
+- Verify iPad is connected to "ForeFlight GPS" WiFi network
+- Check serial monitor for "WiFi client connected" message
+- In ForeFlight, go to More > Devices to check GPS status
+- Ensure you have a GPS fix (OLED shows "FIX")
 
 ### OLED Display Not Working
 - The firmware scans the I2C bus at startup and logs found addresses
@@ -160,10 +160,10 @@ The OLED display shows real-time GPS and Bluetooth status using a built-in 5x7 p
 
 ## Configuration
 
-### Change Bluetooth Device Name
+### Change WiFi Network Name
 Edit in main/main.c:
 ```c
-#define BLE_DEVICE_NAME "ForeFlight GPS"
+#define WIFI_SSID "ForeFlight GPS"
 ```
 
 ### Adjust GPS Baud Rate
@@ -190,19 +190,33 @@ vTaskDelay(pdMS_TO_TICKS(2000));  // 2000 = 2 seconds
 ## Technical Specifications
 
 - **Framework**: ESP-IDF v6.1 (Pure C with FreeRTOS)
-- **Bluetooth**: BLE with Nordic UART Service (NUS)
-  - Service UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-  - TX (notify): 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
-  - RX (write): 6E400002-B5A3-F393-E0A9-E50E24DCCA9E
+- **Connectivity**: WiFi SoftAP (open, channel 6)
+- **Protocol**: GDL90 (Garmin DO-267A) over UDP port 4000
+  - Heartbeat (0x00): Sent every second
+  - Ownship Report (0x0A): GPS position, altitude, speed, track
+  - Geometric Altitude (0x0B): GPS altitude in 5-foot increments
+  - ForeFlight ID (0x65): Device identification
 - **GPS Module**: u-blox M8N at 115200 baud
 - **GPS Output Format**: NMEA 0183 (converted from UBX at startup)
 - **Update Rate**: 10Hz (M8N default)
 - **Accuracy**: ~2.5m CEP (M8N specification)
 - **OLED**: SSD1306 128x64, I2C at 0x3C, built-in 5x7 font
 - **RTOS Tasks**:
-  - GPS task (priority 5): Reads UART, parses NMEA, forwards to BLE
-  - Display task (priority 4): Updates OLED every 2 seconds
-- **Memory**: BLE only (Classic BT disabled to save memory)
+  - GPS task (priority 5): Reads UART, parses NMEA
+  - GDL90 task (priority 4): Encodes and broadcasts GDL90 messages
+  - Display task (priority 3): Updates OLED every 2 seconds
+
+## Enclosure
+
+The `enclosure/` directory contains a parametric OpenSCAD design for a 3D-printable two-part case, also entirely vibe coded with Claude. Open `enclosure/enclosure.scad` in [OpenSCAD](https://openscad.org/) to preview and export STL files for printing.
+
+- Two-part design (base + lid) joined with 4x M3 bolts
+- Solid corner gussets with filleted inner edges
+- Ventilation slots on front and back walls
+- GPS antenna opening and OLED display window in lid
+- USB port cutout in base
+- 45-degree chamfers on outer edges
+- PETG recommended for cockpit heat resistance
 
 ## Project Structure
 
@@ -213,6 +227,8 @@ EFB Bluetooth GPS/
 │   ├── CMakeLists.txt          # Component build config
 │   ├── Kconfig.projbuild       # Configuration menu
 │   └── main.c                  # Main application (C code)
+├── enclosure/
+│   └── enclosure.scad          # Parametric 3D-printable case (OpenSCAD)
 ├── sdkconfig                   # ESP-IDF build configuration
 └── README.md                   # This file
 ```
