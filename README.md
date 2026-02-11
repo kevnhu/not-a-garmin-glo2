@@ -215,6 +215,8 @@ EFB Bluetooth GPS/
 │   ├── CMakeLists.txt          # Component build config
 │   ├── Kconfig.projbuild       # Configuration menu
 │   └── main.c                  # Main application (C code)
+├── enclosure/
+│   └── enclosure.scad          # Parametric 3D-printable case (OpenSCAD)
 ├── sdkconfig                   # ESP-IDF build configuration
 └── README.md                   # This file
 ```
