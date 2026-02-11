@@ -206,18 +206,6 @@ vTaskDelay(pdMS_TO_TICKS(2000));  // 2000 = 2 seconds
   - GDL90 task (priority 4): Encodes and broadcasts GDL90 messages
   - Display task (priority 3): Updates OLED every 2 seconds
 
-## Enclosure
-
-The `enclosure/` directory contains a parametric OpenSCAD design for a 3D-printable two-part case, also entirely vibe coded with Claude. Open `enclosure/enclosure.scad` in [OpenSCAD](https://openscad.org/) to preview and export STL files for printing.
-
-- Two-part design (base + lid) joined with 4x M3 bolts
-- Solid corner gussets with filleted inner edges
-- Ventilation slots on front and back walls
-- GPS antenna opening and OLED display window in lid
-- USB port cutout in base
-- 45-degree chamfers on outer edges
-- PETG recommended for cockpit heat resistance
-
 ## Project Structure
 
 ```
