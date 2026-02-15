@@ -405,8 +405,9 @@ static void gps_send_ubx(const uint8_t *msg, size_t len)
 
 static void gps_configure(void)
 {
-    ESP_LOGI(TAG, "Configuring GPS for NMEA output...");
+    ESP_LOGI(TAG, "Configuring GPS for NMEA output and WAAS/SBAS...");
 
+    // CFG-PRT: Configure UART for NMEA output
     uint8_t cfg_prt[] = {
         0xB5, 0x62, 0x06, 0x00, 0x14, 0x00,
         0x01, 0x00, 0x00, 0x00,
@@ -426,8 +427,29 @@ static void gps_configure(void)
     gps_send_ubx(cfg_prt, sizeof(cfg_prt));
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    // CFG-SBAS: Enable WAAS/SBAS for accuracy improvement (~1m)
+    uint8_t cfg_sbas[] = {
+        0xB5, 0x62, 0x06, 0x16, 0x08, 0x00,
+        0x01,                   // Mode: 1 = enabled
+        0x07,                   // Usage: 7 = use for GPS correction
+        0x03,                   // maxSBAS: 3 satellites
+        0x00,                   // flags
+        0x00, 0x00, 0x00, 0x00, // padding
+        0x00, 0x00              // checksum (will be calculated)
+    };
+    ck_a = 0;
+    ck_b = 0;
+    for (int i = 2; i < (int)sizeof(cfg_sbas) - 2; i++) {
+        ck_a += cfg_sbas[i];
+        ck_b += ck_a;
+    }
+    cfg_sbas[sizeof(cfg_sbas) - 2] = ck_a;
+    cfg_sbas[sizeof(cfg_sbas) - 1] = ck_b;
+    gps_send_ubx(cfg_sbas, sizeof(cfg_sbas));
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     uart_flush(GPS_UART_NUM);
-    ESP_LOGI(TAG, "GPS configured for NMEA output");
+    ESP_LOGI(TAG, "GPS configured for NMEA output with WAAS/SBAS enabled");
 }
 
 // ==================== GDL90 Protocol ====================
