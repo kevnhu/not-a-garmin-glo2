@@ -1,10 +1,10 @@
 # ForeFlight WiFi GPS
 
-> This project was entirely vibe coded with [Claude](https://claude.ai) by Anthropic. It's meant to replicate a Garmin GLO 2, but I was too cheap to buy one.
-
 A WiFi GPS receiver for ForeFlight using ESP32, M8N GPS module, and OLED display. Built with ESP-IDF framework in pure C with FreeRTOS.
 
 The ESP32 creates a WiFi access point and sends GPS data to ForeFlight using the GDL90 protocol over UDP. Just connect your iPad to the "ForeFlight GPS" WiFi network and ForeFlight automatically picks up the GPS data - no pairing or certification needed.
+
+![ForeFlight GPS in use on a flight to Billy Bishop (CYTZ)](IMG_0683.jpeg)
 
 ## Hardware Requirements
 
